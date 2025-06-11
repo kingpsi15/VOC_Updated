@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  # Backend Service
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "3001:3001"   # Expose port 3001 for backend
+    networks:
+      - app-network
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - ollama  # Ensure Ollama is up before starting the backend
+
+  # Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "80:80"      # Expose port 80 for frontend
+    networks:
+      - app-network
+    environment:
+      - REACT_APP_API_URL=http://backend:3001  # Backend URL inside Docker network
+
+  # Ollama Service (optional, if running in a container)
+  ollama:
+    image: ollama/ollama:latest  # Use the Ollama image from Docker Hub
+    ports:
+      - "11500:11500"            # Map port 11500 for Ollama
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
