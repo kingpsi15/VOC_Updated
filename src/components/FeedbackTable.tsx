@@ -255,10 +255,7 @@ const FeedbackTable = ({ searchTerm, statusFilter, serviceFilter, dateFromFilter
                         <Button 
                           variant="outline" 
                           size="sm"
-                          onClick={() => {
-                            console.log('Selected Feedback:', feedbackItem);
-                            setSelectedFeedback(feedbackItem);
-                          }}
+                          onClick={() => setSelectedFeedback(feedbackItem)}
                           className="border-gray-200 hover:bg-gray-50 text-gray-700"
                         >
                           <MessageSquare className="w-4 h-4" />
@@ -330,16 +327,18 @@ const FeedbackTable = ({ searchTerm, statusFilter, serviceFilter, dateFromFilter
                             <div>
                               <h4 className="font-semibold text-gray-900 mb-2">Detected Issues</h4>
                               <div className="flex flex-wrap gap-2">
-                                {selectedFeedback.detected_issues?.title ? (
-                                  <Badge 
-                                    variant="outline"
-                                    className="bg-gray-50 text-gray-700 border-gray-200"
-                                  >
-                                    {selectedFeedback.detected_issues.title}
-                                  </Badge>
-                                ) : (
+                                {selectedFeedback.detected_issues?.length > 0 ? 
+                                  selectedFeedback.detected_issues.map((issue: string, index: number) => (
+                                    <Badge 
+                                      key={index} 
+                                      variant="outline"
+                                      className="bg-gray-50 text-gray-700 border-gray-200"
+                                    >
+                                      {issue}
+                                    </Badge>
+                                  )) : 
                                   <span className="text-gray-500">No issues detected yet</span>
-                                )}
+                                }
                               </div>
                             </div>
                           </div>
