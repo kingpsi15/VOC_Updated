@@ -28,7 +28,7 @@ const dbConfig = {
   host: process.env.DB_HOST || 'localhost',
   port: process.env.DB_PORT || 3306,
   user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
+  password: process.env.DB_PASSWORD || 'Hariom13##',
   database: process.env.DB_NAME || 'feedback_db'
 };
 
@@ -147,7 +147,7 @@ app.get('/api/feedback', async (req, res) => {
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'mistral:7b-instruct';
 // const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://3.110.194.210:11434';
 const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11434';
-const OLLAMA_TIMEOUT = parseInt(process.env.OLLAMA_TIMEOUT) || 30000;
+const OLLAMA_TIMEOUT = parseInt(process.env.OLLAMA_TIMEOUT) || 60000;
 const OLLAMA_RETRIES = parseInt(process.env.OLLAMA_RETRIES) || 3;
 
 // Validate Ollama connection on startup using axios
