@@ -331,12 +331,15 @@ const FeedbackTable = ({ searchTerm, statusFilter, serviceFilter, dateFromFilter
                               <h4 className="font-semibold text-gray-900 mb-2">Detected Issues</h4>
                               <div className="flex flex-wrap gap-2">
                                 {selectedFeedback.detected_issues?.title ? (
-                                  <Badge 
-                                    variant="outline"
-                                    className="bg-gray-50 text-gray-700 border-gray-200"
-                                  >
-                                    {selectedFeedback.detected_issues.title}
-                                  </Badge>
+                                  selectedFeedback.detected_issues.title.split(',').map((title, index) => (
+                                    <Badge 
+                                      key={index}
+                                      variant="outline"
+                                      className="bg-gray-50 text-gray-700 border-gray-200"
+                                    >
+                                      {title.trim()}
+                                    </Badge>
+                                  ))
                                 ) : (
                                   <span className="text-gray-500">No issues detected yet</span>
                                 )}

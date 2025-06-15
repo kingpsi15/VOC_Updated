@@ -206,7 +206,6 @@ async function detectIssuesFromFeedback(connection, feedback) {
     console.log(`[DEBUG] Processing feedback: ${feedback.id}, Rating: ${feedback.review_rating}, Sentiment: ${feedback.sentiment}`);
     console.log(`[DEBUG] Review text: ${feedback.review_text}`);
 
-    // Skip positive feedback
     if (feedback.review_rating >= 4) {
       console.log('[DEBUG] Skipping positive feedback (rating ≥ 4)');
       return null;
@@ -219,7 +218,6 @@ async function detectIssuesFromFeedback(connection, feedback) {
       return null;
     }
 
-    // Use Ollama for issue detection
     console.log('[DEBUG] Using Ollama for issue detection');
     try {
       const prompt = `<s>[INST] You are a banking issue detection expert. Analyze this customer feedback and determine if there is a legitimate operational issue.
@@ -228,20 +226,24 @@ Service: ${service_type}
 Rating: ${review_rating}/5
 Feedback: "${review_text}"
 
-IMPORTANT: Only identify legitimate operational issues, not general complaints.
+IMPORTANT:
+- Only identify legitimate operational issues. Ignore general complaints or sentiments.
+- If one issue is found, respond with a single JSON object.
+- If multiple issues are found, list all issue titles in the "title" field, separated only by commas. Do not use commas elsewhere in your response.
+- Ensure the combined title stays under 50 characters. The description should remain under 200 characters.
 
 Examples of legitimate issues:
-- ATM: "Machine ate my card", "No cash dispensed", "Receipt printer broken"
-- OnlineBanking: "Cannot login", "App crashes", "Transaction failed"
-- CoreBanking: "System down", "Long waiting times due to technical issues"
+- ATM: "Machine ate my card" or "No cash dispensed" or "Receipt printer broken"
+- OnlineBanking: "Cannot login" or "App crashes" or "Transaction failed"
+- CoreBanking: "System down" or "Long waiting times due to technical issues"
 
-If you find a legitimate issue, respond with ONLY this JSON format:
+If you find a legitimate issue (or more than one), respond with ONLY this JSON format:
 {
-  "title": "Brief issue title (max 50 chars)",
-  "description": "Detailed description (max 200 chars)",
+  "title": "Brief issue title or multiple titles separated by commas only",
+  "description": "Detailed description covering all issues without using commas",
   "category": "${service_type}",
   "confidence_score": 0.85,
-  "resolution": "Step-by-step resolution for bank staff"
+  "resolution": "Step-by-step resolution for bank staff without using commas"
 }
 
 If no legitimate issue exists, respond with: null [/INST]`;
@@ -262,15 +264,7 @@ If no legitimate issue exists, respond with: null [/INST]`;
         console.log('[DEBUG] Successfully parsed JSON from Ollama response');
       } else {
         console.log('[DEBUG] No JSON found in response, checking for manual detection');
-        if (service_type === 'ATM' && review_text.toLowerCase().includes('receipt')) {
-          result = {
-            title: "ATM Receipt Issue",
-            description: "Customer reported issues with ATM receipts not being provided or printed correctly.",
-            category: "ATM",
-            confidence_score: 0.85,
-            resolution: "1. Check the receipt printer status in the ATM. 2. Verify if the transaction was completed successfully. 3. Provide transaction confirmation via SMS/email. 4. Schedule maintenance if needed."
-          };
-        }
+        result = null;
       }
 
       if (result === null) {
@@ -278,7 +272,7 @@ If no legitimate issue exists, respond with: null [/INST]`;
         return null;
       }
 
-      // Store detected issue in feedback row
+      // Save entire parsed result JSON in feedback table
       await connection.execute(
         'UPDATE feedback SET detected_issues = ? WHERE id = ?',
         [JSON.stringify(result), id]
@@ -286,44 +280,51 @@ If no legitimate issue exists, respond with: null [/INST]`;
 
       const { title, description, category, confidence_score, resolution } = result;
 
-      const [existingSimilarIssues] = await connection.execute(
-        'SELECT * FROM pending_issues WHERE category = ? AND (title LIKE ? OR description LIKE ?) LIMIT 5',
-        [category, `%${title.substring(0, 50)}%`, `%${description.substring(0, 50)}%`]
-      );
+      const issueTitles = title.split(',').map(t => t.trim());
+      const insertedIssueIds = [];
 
-      if (existingSimilarIssues.length > 0) {
-        const existingIssue = existingSimilarIssues[0];
-        await connection.execute(
-          'UPDATE pending_issues SET feedback_count = feedback_count + 1 WHERE id = ?',
-          [existingIssue.id]
+      for (const individualTitle of issueTitles) {
+        const [existingSimilarIssues] = await connection.execute(
+          'SELECT * FROM pending_issues WHERE category = ? AND (title LIKE ? OR description LIKE ?) LIMIT 5',
+          [category, `%${individualTitle.substring(0, 50)}%`, `%${description.substring(0, 50)}%`]
         );
-        console.log(`[DEBUG] Found similar existing issue: ${existingIssue.id}, incrementing count`);
-        return existingIssue.id;
+
+        if (existingSimilarIssues.length > 0) {
+          const existingIssue = existingSimilarIssues[0];
+          await connection.execute(
+            'UPDATE pending_issues SET feedback_count = feedback_count + 1 WHERE id = ?',
+            [existingIssue.id]
+          );
+          console.log(`[DEBUG] Found similar existing issue: ${existingIssue.id}, incrementing count`);
+          insertedIssueIds.push(existingIssue.id);
+          continue;
+        }
+
+        const issueId = 'pending_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+        await connection.execute(
+          `INSERT INTO pending_issues 
+           (id, title, description, category, confidence_score, feedback_count, detected_from_feedback_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+          [issueId, individualTitle, description, category, confidence_score, 1, id]
+        );
+
+        const resolutionId = 'resolution_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+        await connection.execute(
+          `INSERT INTO pending_resolutions 
+           (id, pending_issue_id, resolution_text, confidence_score, created_at)
+           VALUES (?, ?, ?, ?, NOW())`,
+          [resolutionId, issueId, resolution || '', confidence_score]
+        );
+
+        console.log(`[DEBUG] Created new issue and resolution: ${issueId}, ${resolutionId}`);
+        insertedIssueIds.push(issueId);
       }
 
-      const issueId = 'pending_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-      await connection.execute(
-        `INSERT INTO pending_issues 
-         (id, title, description, category, confidence_score, feedback_count, detected_from_feedback_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-        [issueId, title, description, category, confidence_score, 1, id]
-      );
-
-      const resolutionId = 'resolution_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-      await connection.execute(
-        `INSERT INTO pending_resolutions 
-         (id, pending_issue_id, resolution_text, confidence_score, created_at)
-         VALUES (?, ?, ?, ?, NOW())`,
-        [resolutionId, issueId, resolution || '', confidence_score]
-      );
-
-      console.log(`[DEBUG] Created new issue and resolution: ${issueId}, ${resolutionId}`);
-      return issueId;
+      return insertedIssueIds.length === 1 ? insertedIssueIds[0] : insertedIssueIds;
 
     } catch (error) {
       console.error('[DEBUG] Error calling Ollama:', error.message);
 
-      // Keyword-based fallback
       if (service_type === 'ATM') {
         const keywords = ['receipt', 'transaction', 'not working', 'card', 'cash', 'money', 'stuck'];
         for (const keyword of keywords) {
@@ -385,6 +386,105 @@ If no legitimate issue exists, respond with: null [/INST]`;
   }
 }
 
+async function detectPositiveAspectsFromFeedback(connection, feedback) {
+  try {
+    console.log(`[DEBUG] Processing feedback for positives: ${feedback.id}, Rating: ${feedback.review_rating}, Sentiment: ${feedback.sentiment}`);
+    console.log(`[DEBUG] Review text: ${feedback.review_text}`);
+
+    const { id, review_text, service_type, review_rating } = feedback;
+
+    if (!review_text || review_text.trim().length < 10) {
+      console.log('[DEBUG] Skipping feedback with insufficient text');
+      return null;
+    }
+
+    console.log('[DEBUG] Using Ollama for positive aspect detection');
+    try {
+      const prompt = `<s>[INST] You are a banking feedback analysis expert. Analyze this customer feedback and detect if there are any positive operational aspects worth highlighting.
+
+Service: ${service_type}
+Rating: ${review_rating}/5
+Feedback: "${review_text}"
+
+IMPORTANT:
+- Only identify positive operational aspects (e.g., fast service, smooth transaction, helpful UI). Ignore general appreciation.
+- If one aspect is found, respond with a single JSON object.
+- If multiple aspects are found, list all aspect titles in the "title" field, separated only by commas. Do not use commas elsewhere.
+- Ensure the combined title stays under 50 characters. Description should stay under 200 characters.
+
+Examples of positive aspects:
+- ATM: "Quick cash withdrawal" or "Easy to use interface"
+- OnlineBanking: "Login was fast" or "Smooth UPI transfer"
+- CoreBanking: "Efficient staff support" or "Instant account update"
+
+If you find a legitimate positive aspect (or more than one), respond with ONLY this JSON format:
+{
+  "title": "Brief aspect title or multiple titles separated by commas only",
+  "description": "Detailed description covering all aspects without using commas",
+  "category": "${service_type}",
+  "confidence_score": 0.85
+}
+
+If no positive aspect exists, respond with: null [/INST]`;
+
+      const response = await axios.post(`${OLLAMA_HOST}/api/generate`, {
+        model: OLLAMA_MODEL,
+        prompt,
+        stream: false
+      });
+
+      const content = response.data.response.trim();
+      console.log('[DEBUG] Ollama response content:', content);
+
+      let result = null;
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        result = JSON.parse(jsonMatch[0]);
+        console.log('[DEBUG] Successfully parsed JSON from Ollama response');
+      } else {
+        console.log('[DEBUG] No JSON found in response, checking for manual fallback');
+        return null;
+      }
+
+      if (result === null) {
+        console.log('[DEBUG] No positive aspect detected in the feedback');
+        return null;
+      }
+
+      await connection.execute(
+        'UPDATE feedback SET detected_positive_aspects = ? WHERE id = ?',
+        [JSON.stringify(result), id]
+      );
+
+      const { title, description, category, confidence_score } = result;
+      const aspectTitles = title.split(',').map(t => t.trim());
+
+      for (const individualTitle of aspectTitles) {
+        const aspectId = 'positive_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+
+        await connection.execute(
+          `INSERT INTO positive_aspects 
+           (id, title, description, category, confidence_score, detected_from_feedback_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+          [aspectId, individualTitle, description, category, confidence_score, id]
+        );
+
+        console.log(`[DEBUG] Created positive aspect: ${aspectId}`);
+      }
+
+      return aspectTitles.length === 1 ? aspectTitles[0] : aspectTitles;
+
+    } catch (error) {
+      console.error('[DEBUG] Error calling Ollama for positive detection:', error.message);
+      return null;
+    }
+
+  } catch (err) {
+    console.error('[DEBUG] Unexpected error in positive detection:', err.message);
+    return null;
+  }
+}
+
 app.post('/api/feedback', async (req, res) => {
   let connection;
   try {
@@ -402,7 +502,6 @@ app.post('/api/feedback', async (req, res) => {
     const feedbackId = 'fb_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
     const positive_flag = review_rating >= 4;
     const negative_flag = review_rating <= 3;
-
     const sentiment = positive_flag ? 'positive' : 'negative';
 
     const query = `
@@ -424,6 +523,8 @@ app.post('/api/feedback', async (req, res) => {
     console.log(`[INFO] Feedback created with ID: ${feedbackId}`);
 
     let issueId = null;
+
+    // 🔍 Detect issues (only for negative feedback)
     if (negative_flag) {
       console.log(`[INFO] Negative feedback detected (rating ${review_rating}), detecting issues...`);
       try {
@@ -431,77 +532,94 @@ app.post('/api/feedback', async (req, res) => {
           id: feedbackId, review_text, service_type, review_rating, sentiment, positive_flag, negative_flag
         });
 
-        if (issueId) {
-          console.log(`[INFO] Issue detected and created with ID: ${issueId}`);
+        const issueIds = Array.isArray(issueId) ? issueId : issueId ? [issueId] : [];
+
+        if (issueIds.length > 0) {
+          issueIds.forEach(id => console.log(`[INFO] Issue detected and created with ID: ${id}`));
         } else {
           console.log(`[WARN] No issues detected for negative feedback ID: ${feedbackId}`);
-
-          // Fallback issue detection for specific keywords if LLM detection failed
-          if (service_type === 'ATM' && review_text.toLowerCase().includes('receipt')) {
-            console.log('[INFO] Fallback: Creating ATM receipt issue');
-            issueId = 'pending_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-
-            await connection.execute(
-              `INSERT INTO pending_issues 
-                (id, title, description, category, confidence_score, feedback_count, detected_from_feedback_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-              [
-                issueId,
-                "ATM Receipt Issue",
-                "Customer reported issues with ATM receipts or transaction confirmation.",
-                "ATM",
-                0.9,
-                1,
-                feedbackId
-              ]
-            );
-
-            const resolutionId = 'resolution_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-            await connection.execute(
-              `INSERT INTO pending_resolutions 
-                (id, pending_issue_id, resolution_text, confidence_score, created_at)
-                VALUES (?, ?, ?, ?, NOW())`,
-              [
-                resolutionId,
-                issueId,
-                "1. Verify if the transaction was completed successfully in the system. 2. Inform the customer about their transaction status. 3. Check the ATM's receipt printer functionality. 4. Schedule maintenance if needed.",
-                0.9
-              ]
-            );
-
-            // Update feedback with fallback issue
-            const fallbackIssue = {
-              title: "ATM Receipt Issue",
-              description: "Customer reported issues with ATM receipts or transaction confirmation.",
-              category: "ATM",
-              confidence_score: 0.9,
-              resolution: "1. Verify if the transaction was completed successfully in the system. 2. Inform the customer about their transaction status. 3. Check the ATM's receipt printer functionality. 4. Schedule maintenance if needed."
-            };
-
-            await connection.execute(
-              'UPDATE feedback SET detected_issues = ? WHERE id = ?',
-              [JSON.stringify(fallbackIssue), feedbackId]
-            );
-
-            console.log(`[INFO] Created fallback issue with ID: ${issueId}`);
-          }
         }
+
+        // ⚠️ Fallback issue for ATM receipt
+        if (issueIds.length === 0 && service_type === 'ATM' && review_text.toLowerCase().includes('receipt')) {
+          console.log('[INFO] Fallback: Creating ATM receipt issue');
+          const fallbackId = 'pending_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+
+          await connection.execute(
+            `INSERT INTO pending_issues 
+              (id, title, description, category, confidence_score, feedback_count, detected_from_feedback_id, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+            [
+              fallbackId,
+              "ATM Receipt Issue",
+              "Customer reported issues with ATM receipts or transaction confirmation.",
+              "ATM",
+              0.9,
+              1,
+              feedbackId
+            ]
+          );
+
+          const resolutionId = 'resolution_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+          await connection.execute(
+            `INSERT INTO pending_resolutions 
+              (id, pending_issue_id, resolution_text, confidence_score, created_at)
+              VALUES (?, ?, ?, ?, NOW())`,
+            [
+              resolutionId,
+              fallbackId,
+              "1. Verify if the transaction was completed successfully in the system. 2. Inform the customer about their transaction status. 3. Check the ATM's receipt printer functionality. 4. Schedule maintenance if needed.",
+              0.9
+            ]
+          );
+
+          const fallbackIssue = {
+            title: "ATM Receipt Issue",
+            description: "Customer reported issues with ATM receipts or transaction confirmation.",
+            category: "ATM",
+            confidence_score: 0.9,
+            resolution: "1. Verify if the transaction was completed successfully in the system. 2. Inform the customer about their transaction status. 3. Check the ATM's receipt printer functionality. 4. Schedule maintenance if needed."
+          };
+
+          await connection.execute(
+            'UPDATE feedback SET detected_issues = ? WHERE id = ?',
+            [JSON.stringify(fallbackIssue), feedbackId]
+          );
+
+          console.log(`[INFO] Created fallback issue with ID: ${fallbackId}`);
+          issueId = [fallbackId];
+        }
+
       } catch (issueError) {
         console.error('[ERROR] Issue detection failed:', issueError);
       }
+
     } else {
       console.log(`[INFO] Positive feedback (rating ${review_rating}), skipping issue detection`);
     }
 
+    // 🌟 Detect positive aspects (for ALL feedbacks, regardless of rating)
+    try {
+      await detectPositiveAspectsFromFeedback(connection, {
+        id: feedbackId, review_text, service_type, review_rating, sentiment, positive_flag, negative_flag
+      });
+      console.log(`[INFO] Positive aspect detection completed for feedback ID: ${feedbackId}`);
+    } catch (positiveErr) {
+      console.error('[ERROR] Positive aspect detection failed:', positiveErr);
+    }
+
     await connection.commit();
+
+    const issueIds = Array.isArray(issueId) ? issueId : issueId ? [issueId] : [];
 
     res.json({
       success: true,
       id: feedbackId,
-      issue_detected: issueId ? true : false,
-      issue_id: issueId,
+      issue_detected: issueIds.length > 0,
+      issue_ids: issueIds,
       message: 'Feedback created successfully'
     });
+
   } catch (error) {
     if (connection) await connection.rollback();
     console.error('[ERROR] Error creating feedback:', error);
