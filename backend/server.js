@@ -386,6 +386,105 @@ If no legitimate issue exists, respond with: null [/INST]`;
   }
 }
 
+async function detectPositiveAspectsFromFeedback(connection, feedback) {
+  try {
+    console.log(`[DEBUG] Processing feedback for positives: ${feedback.id}, Rating: ${feedback.review_rating}, Sentiment: ${feedback.sentiment}`);
+    console.log(`[DEBUG] Review text: ${feedback.review_text}`);
+
+    const { id, review_text, service_type, review_rating } = feedback;
+
+    if (!review_text || review_text.trim().length < 10) {
+      console.log('[DEBUG] Skipping feedback with insufficient text');
+      return null;
+    }
+
+    console.log('[DEBUG] Using Ollama for positive aspect detection');
+    try {
+      const prompt = `<s>[INST] You are a banking feedback analysis expert. Analyze this customer feedback and detect if there are any positive operational aspects worth highlighting.
+
+Service: ${service_type}
+Rating: ${review_rating}/5
+Feedback: "${review_text}"
+
+IMPORTANT:
+- Only identify positive operational aspects (e.g., fast service, smooth transaction, helpful UI). Ignore general appreciation.
+- If one aspect is found, respond with a single JSON object.
+- If multiple aspects are found, list all aspect titles in the "title" field, separated only by commas. Do not use commas elsewhere.
+- Ensure the combined title stays under 50 characters. Description should stay under 200 characters.
+
+Examples of positive aspects:
+- ATM: "Quick cash withdrawal" or "Easy to use interface"
+- OnlineBanking: "Login was fast" or "Smooth UPI transfer"
+- CoreBanking: "Efficient staff support" or "Instant account update"
+
+If you find a legitimate positive aspect (or more than one), respond with ONLY this JSON format:
+{
+  "title": "Brief aspect title or multiple titles separated by commas only",
+  "description": "Detailed description covering all aspects without using commas",
+  "category": "${service_type}",
+  "confidence_score": 0.85
+}
+
+If no positive aspect exists, respond with: null [/INST]`;
+
+      const response = await axios.post(`${OLLAMA_HOST}/api/generate`, {
+        model: OLLAMA_MODEL,
+        prompt,
+        stream: false
+      });
+
+      const content = response.data.response.trim();
+      console.log('[DEBUG] Ollama response content:', content);
+
+      let result = null;
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        result = JSON.parse(jsonMatch[0]);
+        console.log('[DEBUG] Successfully parsed JSON from Ollama response');
+      } else {
+        console.log('[DEBUG] No JSON found in response, checking for manual fallback');
+        return null;
+      }
+
+      if (result === null) {
+        console.log('[DEBUG] No positive aspect detected in the feedback');
+        return null;
+      }
+
+      await connection.execute(
+        'UPDATE feedback SET detected_positive_aspects = ? WHERE id = ?',
+        [JSON.stringify(result), id]
+      );
+
+      const { title, description, category, confidence_score } = result;
+      const aspectTitles = title.split(',').map(t => t.trim());
+
+      for (const individualTitle of aspectTitles) {
+        const aspectId = 'positive_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+
+        await connection.execute(
+          `INSERT INTO positive_aspects 
+           (id, title, description, category, confidence_score, detected_from_feedback_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+          [aspectId, individualTitle, description, category, confidence_score, id]
+        );
+
+        console.log(`[DEBUG] Created positive aspect: ${aspectId}`);
+      }
+
+      return aspectTitles.length === 1 ? aspectTitles[0] : aspectTitles;
+
+    } catch (error) {
+      console.error('[DEBUG] Error calling Ollama for positive detection:', error.message);
+      return null;
+    }
+
+  } catch (err) {
+    console.error('[DEBUG] Unexpected error in positive detection:', err.message);
+    return null;
+  }
+}
+
 app.post('/api/feedback', async (req, res) => {
   let connection;
   try {
@@ -424,6 +523,8 @@ app.post('/api/feedback', async (req, res) => {
     console.log(`[INFO] Feedback created with ID: ${feedbackId}`);
 
     let issueId = null;
+
+    // 🔍 Detect issues (only for negative feedback)
     if (negative_flag) {
       console.log(`[INFO] Negative feedback detected (rating ${review_rating}), detecting issues...`);
       try {
@@ -439,7 +540,7 @@ app.post('/api/feedback', async (req, res) => {
           console.log(`[WARN] No issues detected for negative feedback ID: ${feedbackId}`);
         }
 
-        // Fallback issue detection
+        // ⚠️ Fallback issue for ATM receipt
         if (issueIds.length === 0 && service_type === 'ATM' && review_text.toLowerCase().includes('receipt')) {
           console.log('[INFO] Fallback: Creating ATM receipt issue');
           const fallbackId = 'pending_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
@@ -492,8 +593,19 @@ app.post('/api/feedback', async (req, res) => {
       } catch (issueError) {
         console.error('[ERROR] Issue detection failed:', issueError);
       }
+
     } else {
       console.log(`[INFO] Positive feedback (rating ${review_rating}), skipping issue detection`);
+    }
+
+    // 🌟 Detect positive aspects (for ALL feedbacks, regardless of rating)
+    try {
+      await detectPositiveAspectsFromFeedback(connection, {
+        id: feedbackId, review_text, service_type, review_rating, sentiment, positive_flag, negative_flag
+      });
+      console.log(`[INFO] Positive aspect detection completed for feedback ID: ${feedbackId}`);
+    } catch (positiveErr) {
+      console.error('[ERROR] Positive aspect detection failed:', positiveErr);
     }
 
     await connection.commit();
@@ -516,7 +628,6 @@ app.post('/api/feedback', async (req, res) => {
     if (connection) connection.release();
   }
 });
-
 
 // Update feedback
 app.put('/api/feedback/:id', async (req, res) => {
